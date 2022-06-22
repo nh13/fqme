@@ -1,0 +1,73 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  publish:
+    name: Publish for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: demux
+            asset_name: demux-linux-amd64
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: webfactory/ssh-agent@v0.5.4
+        with:
+         ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Configure AWS credentials from Test account
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: us-west-1
+          aws-access-key-id: ${{ secrets.AWS_KEY_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Get the version
+        id: get_version
+        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --locked
+
+      - name: Build archive
+        shell: bash
+        run: |
+          staging="${{matrix.asset_name}}-src"
+          mkdir -p "$staging"
+
+          # TODO: add license back in
+          cp README.md "$staging/"
+          cp {build.rs,Cargo.toml,Cargo.lock} "$staging/"
+          cp -R ./src "./$staging/src"
+
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "${staging}.zip" "$staging"
+            echo "ASSET=${staging}.zip" >> $GITHUB_ENV
+          else
+            tar czf "${staging}.tar.gz" "${staging}"
+            echo "ASSET=${staging}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/release/${{ matrix.artifact_name }}
+          asset_name: ${{ matrix.asset_name }}_${{ steps.getversion.outputs.VERSION }}
+          tag: ${{ github.ref }}
+      
+      - name: Upload binaries to S3
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            aws s3 cp target/release/${{ matrix.artifact_name }} s3://singular-demux/${{ matrix.asset_name }}/${{ steps.get_version.outputs.VERSION }}/${{ matrix.artifact_name }}_${{ steps.get_version.outputs.VERSION }}
+          fi
