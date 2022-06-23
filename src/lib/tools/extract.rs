@@ -196,6 +196,7 @@ impl BgzfReader {
 
 impl Read for BgzfReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[allow(clippy::needless_range_loop)]
         for buf_index in 0..buf.len() {
             // no more data available, try to fill
             if self.bytes_available() == 0 {
