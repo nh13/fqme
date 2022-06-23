@@ -1,5 +1,9 @@
 # FASTQ ME
 
+[![Check](https://github.com/nh13/fqme/actions/workflows/build_and_test.yml/badge.svg)](https://github.com/nh13/fqme/actions/workflows/build_and_test.yml)
+[![License](http://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nh13/fqme/blob/main/LICENSE)
+[![Language](http://img.shields.io/badge/language-rust-brightgreen.svg)](http://www.https://www.rust-lang.org/)
+
 ## Quickstart
 
 Compress and index (two-ways) the FASTQ with [`bgzip`](http://www.htslib.org/doc/bgzip.html):
