@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, ensure, Result};
@@ -9,11 +9,10 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use clap::Parser;
 use env_logger::Env;
 use seq_io::BaseRecord;
-use serde::{Deserialize, Serialize};
 
 use crate::utils::{built_info, BUFFERSIZE};
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use gzp::{deflate::Bgzf, BlockFormatSpec, FooterValues, FormatSpec, GzpError, BUFSIZE};
 
 const BGZF_BLOCK_SIZE: usize = 65280;
@@ -28,11 +27,11 @@ pub struct Opts {
 
     /// The first record to display (1-based).
     #[clap(short = 's', long, display_order = 2)]
-    pub start: Option<usize>,
+    pub start: Option<u64>,
 
     /// The last record to display (1-based inclusive).
     #[clap(short = 'e', long, display_order = 2)]
-    pub end: Option<usize>,
+    pub end: Option<u64>,
 }
 
 // Run extract
@@ -51,7 +50,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let gzi_path = format!("{}.{}", opts.input.to_string_lossy(), "gzi");
 
     // Read the FASTQ index
-    let fqi_range = FastqIndexRange::from(fqi_path, start, end);
+    let fqi_range = FastqIndexRange::from(&fqi_path, start, end);
     // println!(
     //     "The following command will output {} leading and {} trailing records:",
     //     fqi_range.leading_records, fqi_range.trailing_records
@@ -109,10 +108,10 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         uncompressed_data.iter().skip_while(|x| *x != &b'@').copied().collect();
     let reader = seq_io::fastq::Reader::new(data_iter.as_slice());
     let mut writer = BufWriter::with_capacity(BUFFERSIZE, io::stdout());
-    let mut num_to_write: usize = end - start + 1;
+    let mut num_to_write: u64 = end - start + 1;
     for (index, result) in reader.into_records().enumerate() {
         let rec = result?;
-        if index >= fqi_range.leading_records {
+        if index as u64 >= fqi_range.leading_records {
             rec.write(&mut writer)?;
             num_to_write -= 1;
         }
@@ -153,40 +152,41 @@ pub fn setup() -> Opts {
     Opts::parse()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct FastqIndex {
-    pub num_records: usize,
+    pub num_records: u64,
 
-    pub total_bytes: usize,
+    pub total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct FastqIndexRange {
-    pub start_byte: usize,
-    pub num_bytes: usize,
-    pub leading_records: usize,
-    pub trailing_records: usize,
-    pub num_records: usize,
+    pub start_byte: u64,
+    pub num_bytes: u64,
+    pub leading_records: u64,
+    pub trailing_records: u64,
+    pub num_records: u64,
 }
 
 impl FastqIndexRange {
-    pub fn from(fastq_index: String, start_record: usize, end_record: usize) -> FastqIndexRange {
-        let mut fqi_reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .delimiter(b'\t')
-            .from_path(fastq_index)
-            .unwrap();
-
+    pub fn from(fastq_index: &str, start_record: u64, end_record: u64) -> FastqIndexRange {
         let indexes = {
-            let results: Result<Vec<FastqIndex>, _> = fqi_reader.deserialize().collect();
-            results.unwrap()
+            let path = Path::new(fastq_index);
+            let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path).unwrap());
+            let mut entries: Vec<FastqIndex> = vec![];
+            while let Ok(num_records) = reader.read_u64::<LittleEndian>() {
+                let total_bytes = reader.read_u64::<LittleEndian>().unwrap();
+                let entry = FastqIndex { num_records, total_bytes };
+                entries.push(entry);
+            }
+            entries
         };
 
-        let mut leading_records: usize = start_record - 1;
-        let mut trailing_records: usize = 0;
-        let mut start_byte: usize = 0;
-        let mut end_byte: usize = 0;
-        let mut num_records: usize = 0;
+        let mut leading_records: u64 = start_record - 1;
+        let mut trailing_records: u64 = 0;
+        let mut start_byte: u64 = 0;
+        let mut end_byte: u64 = 0;
+        let mut num_records: u64 = 0;
         for entry in indexes {
             if entry.num_records < start_record {
                 leading_records = start_record - entry.num_records - 1;

@@ -1,5 +1,6 @@
+use byteorder::{WriteBytesExt, LittleEndian};
 use fgoxide::io::Io;
-use std::{path::PathBuf, io, io::{Write, BufReader}, io:: BufWriter};
+use std::{path::PathBuf, io, io::BufReader, io:: BufWriter};
 
 use anyhow::Result;
 use clap::Parser;
@@ -20,7 +21,7 @@ pub struct Opts {
 
     /// Index every Nth entry
     #[clap(short = 'n', long, default_value = "100000", display_order = 3)]
-    pub nth: usize,
+    pub nth: u64,
 
     /// True to omit emitting the FASTQ to stdout
     #[clap(long, display_order = 4)]
@@ -45,8 +46,8 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         }
     };
 
-    let mut total_bytes: usize = 0;
-    let mut num_records: usize = 0;
+    let mut total_bytes: u64 = 0;
+    let mut num_records: u64 = 0;
     for result in reader {
         let rec: OwnedRecord = result.unwrap();
 
@@ -65,17 +66,19 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         num_records += 1;
 
         if num_records % opts.nth == 0 {
-            index_writer.write_all(format!("{}\t{}\n", num_records, total_bytes).as_bytes())?;
+            index_writer.write_u64::<LittleEndian>(num_records)?;
+            index_writer.write_u64::<LittleEndian>(total_bytes)?;
         }
 
-        total_bytes += num_bytes;
+        total_bytes += num_bytes as u64;
 
         if let Some(ref mut writer) = fastq_writer {
             rec.write(writer)?;
         }
     }
     if num_records % opts.nth != 0 {
-        index_writer.write_all(format!("{}\t{}\n", num_records, total_bytes).as_bytes())?;
+        index_writer.write_u64::<LittleEndian>(num_records)?;
+        index_writer.write_u64::<LittleEndian>(total_bytes)?;
     }
     
     Ok(())

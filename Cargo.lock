@@ -360,7 +360,6 @@ dependencies = [
  "byteorder",
  "bytes",
  "clap",
- "csv",
  "env_logger",
  "fgoxide",
  "gzp",
@@ -370,7 +369,6 @@ dependencies = [
  "matches",
  "rstest",
  "seq_io",
- "serde",
  "tempfile",
 ]
 
