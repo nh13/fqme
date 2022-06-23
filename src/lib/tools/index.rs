@@ -1,20 +1,19 @@
-use byteorder::{WriteBytesExt, LittleEndian};
+use byteorder::{LittleEndian, WriteBytesExt};
 use fgoxide::io::Io;
-use std::{path::PathBuf, io, io::BufReader, io:: BufWriter};
+use std::{io, io::BufReader, io::BufWriter, path::PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
 use env_logger::Env;
 
-use seq_io::{BaseRecord, fastq::OwnedRecord};
+use seq_io::{fastq::OwnedRecord, BaseRecord};
 
-use crate::utils::{BUFFERSIZE, built_info};
+use crate::utils::{built_info, BUFFERSIZE};
 
 /// Index a FASTQ
 #[derive(Parser, Debug)]
 #[clap(name = "fq2bam", verbatim_doc_comment, version = built_info::VERSION.as_str())]
 pub struct Opts {
-
     /// The output index file.
     #[clap(short = 'o', long, display_order = 2)]
     pub output: PathBuf,
@@ -32,7 +31,7 @@ pub struct Opts {
 #[allow(clippy::too_many_lines)]
 pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let reader = {
-        let reader =  BufReader::with_capacity(BUFFERSIZE, io::stdin());
+        let reader = BufReader::with_capacity(BUFFERSIZE, io::stdin());
         seq_io::fastq::Reader::new(reader).into_records()
     };
 
@@ -54,7 +53,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         // NB: this is incorrect if there exists comment
         let num_bytes: usize = {
             1 // leading '@'
-            + rec.head.len() 
+            + rec.head.len()
             + 1 // newline
             + rec.seq.len()
             + 1 // newline
@@ -80,7 +79,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         index_writer.write_u64::<LittleEndian>(num_records)?;
         index_writer.write_u64::<LittleEndian>(total_bytes)?;
     }
-    
+
     Ok(())
 }
 
