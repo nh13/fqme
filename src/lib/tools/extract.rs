@@ -8,6 +8,7 @@ use anyhow::{bail, ensure, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use clap::Parser;
 use env_logger::Env;
+use libdeflater::Decompressor;
 use seq_io::BaseRecord;
 
 use crate::utils::{built_info, BUFFERSIZE};
@@ -71,42 +72,12 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         }
     }
 
-    // Open the BGZF file and seek to the block offset
-    let mut reader = File::open(opts.input.clone())?;
-    reader.seek(SeekFrom::Start(start_entry.compressed_offset))?;
-
-    // Loop through all the blocks
-    let bgzf = Bgzf::new();
-    let mut header_buf = vec![0; Bgzf::HEADER_SIZE];
-    let mut compressed_buffer = BytesMut::with_capacity(BGZF_BLOCK_SIZE);
-    let mut uncompressed_buffer = BytesMut::with_capacity(BUFSIZE);
-    let mut decompressor = libdeflater::Decompressor::new();
-    let mut uncompressed_data: Vec<u8> = vec![];
-    for _ in 0..num_blocks {
-        // Read the block header
-        reader.read_exact(&mut header_buf)?;
-        bgzf.check_header(&header_buf).unwrap();
-
-        // Read the compressed block data
-        let size = bgzf.get_block_size(&header_buf).unwrap();
-        compressed_buffer.clear();
-        compressed_buffer.resize(size - Bgzf::HEADER_SIZE, 0);
-        reader.read_exact(&mut compressed_buffer)?;
-        let check = bgzf.get_footer_values(&compressed_buffer);
-
-        // Decompress the block data
-        uncompressed_buffer.clear();
-        uncompressed_buffer.resize(check.amount as usize, 0);
-        decompress(&compressed_buffer, &mut decompressor, &mut uncompressed_buffer, check).unwrap();
-
-        // Append
-        uncompressed_data.extend_from_slice(&uncompressed_buffer);
-    }
+    // Build a BgzfReader starting at the next FASTQ record
+    let file = File::open(opts.input.clone()).unwrap();
+    let bgzf_reader: BgzfReader = BgzfReader::new(file, start_entry.compressed_offset, num_blocks);
 
     // Write the FASTQ entries
-    let data_iter: Vec<u8> =
-        uncompressed_data.iter().skip_while(|x| *x != &b'@').copied().collect();
-    let reader = seq_io::fastq::Reader::new(data_iter.as_slice());
+    let reader = seq_io::fastq::Reader::new(bgzf_reader);
     let mut writer = BufWriter::with_capacity(BUFFERSIZE, io::stdout());
     let mut num_to_write: u64 = end - start + 1;
     for (index, result) in reader.into_records().enumerate() {
@@ -121,6 +92,124 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+pub struct BgzfReader {
+    reader: File,
+    bgzf: Bgzf,
+    header_buf: Vec<u8>,
+    compressed_buffer: BytesMut,
+    uncompressed_buffer: BytesMut,
+    decompressor: Decompressor,
+    uncompressed_data: Vec<u8>,
+    uncompressed_data_index: usize,
+    num_blocks_left: usize,
+}
+
+impl BgzfReader {
+    fn new(mut reader: File, compressed_offset: u64, num_blocks: usize) -> Self {
+        let bgzf = Bgzf::new();
+        let header_buf = vec![0; Bgzf::HEADER_SIZE];
+        let compressed_buffer = BytesMut::with_capacity(BGZF_BLOCK_SIZE);
+        let uncompressed_buffer = BytesMut::with_capacity(BUFSIZE);
+        let decompressor = libdeflater::Decompressor::new();
+        let uncompressed_data: Vec<u8> = vec![];
+
+        reader.seek(SeekFrom::Start(compressed_offset)).unwrap();
+
+        let mut bgzf_reader = BgzfReader {
+            reader,
+            bgzf,
+            header_buf,
+            compressed_buffer,
+            uncompressed_buffer,
+            decompressor,
+            uncompressed_data,
+            uncompressed_data_index: 0,
+            num_blocks_left: num_blocks,
+        };
+
+        // skip over any data until we hit a '@' or end of data
+        'outer: loop {
+            // fill the data, stop when we have no more data
+            if bgzf_reader.fill().unwrap() == 0 {
+                break;
+            }
+            // skip over any data until we hit a '@' or end of data
+            while bgzf_reader.uncompressed_data_index < bgzf_reader.uncompressed_data.len() {
+                if bgzf_reader.uncompressed_data[bgzf_reader.uncompressed_data_index] == b'@' {
+                    break 'outer;
+                }
+                bgzf_reader.uncompressed_data_index += 1;
+            }
+        }
+        bgzf_reader
+    }
+
+    fn bytes_available(&self) -> usize {
+        self.uncompressed_data.len() - self.uncompressed_data_index
+    }
+
+    fn fill(&mut self) -> io::Result<usize> {
+        let available = self.bytes_available();
+        if 0 < available {
+            return Ok(available);
+        }
+
+        // if no more blocks, we fill nothing
+        if self.num_blocks_left == 0 {
+            return Ok(0);
+        }
+
+        // Read in a block!
+
+        // Read the block header
+        self.reader.read_exact(&mut self.header_buf)?;
+        self.bgzf.check_header(&self.header_buf).unwrap();
+
+        // Read the compressed block data
+        let size = self.bgzf.get_block_size(&self.header_buf).unwrap();
+        self.compressed_buffer.clear();
+        self.compressed_buffer.resize(size - Bgzf::HEADER_SIZE, 0);
+        self.reader.read_exact(&mut self.compressed_buffer)?;
+        let check = self.bgzf.get_footer_values(&self.compressed_buffer);
+
+        // Decompress the block data
+        self.uncompressed_buffer.clear();
+        self.uncompressed_buffer.resize(check.amount as usize, 0);
+        decompress(
+            &self.compressed_buffer,
+            &mut self.decompressor,
+            &mut self.uncompressed_buffer,
+            check,
+        )
+        .unwrap();
+
+        // Append
+        self.uncompressed_data.clear();
+        self.uncompressed_data.extend(&self.uncompressed_buffer);
+        self.uncompressed_data_index = 0;
+
+        Ok(self.bytes_available())
+    }
+}
+
+impl Read for BgzfReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        for buf_index in 0..buf.len() {
+            // no more data available, try to fill
+            if self.bytes_available() == 0 {
+                // no more data was filled, return how many bytes we've read
+                if let Ok(0) = self.fill() {
+                    return Ok(buf_index);
+                }
+            }
+            // add the byte
+            buf[buf_index] = self.uncompressed_data[self.uncompressed_data_index];
+            self.uncompressed_data_index += 1;
+        }
+        Ok(buf.len())
+    }
 }
 
 #[inline]
