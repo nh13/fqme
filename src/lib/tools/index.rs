@@ -62,23 +62,21 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
             + 1 // newline
         };
 
-        num_records += 1;
-
         if num_records % opts.nth == 0 {
             index_writer.write_u64::<LittleEndian>(num_records)?;
             index_writer.write_u64::<LittleEndian>(total_bytes)?;
         }
 
+        num_records += 1;
         total_bytes += num_bytes as u64;
 
         if let Some(ref mut writer) = fastq_writer {
             rec.write(writer)?;
         }
     }
-    if num_records % opts.nth != 0 {
-        index_writer.write_u64::<LittleEndian>(num_records)?;
-        index_writer.write_u64::<LittleEndian>(total_bytes)?;
-    }
+
+    index_writer.write_u64::<LittleEndian>(num_records)?;
+    index_writer.write_u64::<LittleEndian>(total_bytes)?;
 
     Ok(())
 }
