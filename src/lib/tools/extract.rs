@@ -1,17 +1,22 @@
 use std::{
     fs::File,
-    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom},
+    io::{self, BufWriter, ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, ensure, Result};
-use byteorder::{LittleEndian, ReadBytesExt};
 use clap::Parser;
 use env_logger::Env;
 use libdeflater::Decompressor;
 use seq_io::BaseRecord;
 
-use crate::utils::{built_info, BUFFERSIZE};
+use crate::{
+    tools::{
+        bgzf_index::{BgzfIndex, BgzfIndexOffset},
+        fastq_index::FastqIndex,
+    },
+    utils::{built_info, BUFFERSIZE},
+};
 
 use bytes::BytesMut;
 use gzp::{deflate::Bgzf, BlockFormatSpec, FooterValues, FormatSpec, GzpError, BUFSIZE};
@@ -51,12 +56,17 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let gzi_path = format!("{}.{}", opts.input.to_string_lossy(), "gzi");
 
     // Read the FASTQ index
-    let fqi_range = FastqIndexRange::from(&fqi_path, start, end);
+    let fastq_index = FastqIndex::read(Path::new(&fqi_path));
+    let fqi_range = match fastq_index.range(start, end) {
+        Some(range) => range,
+        None => return Ok(()),
+    };
+    // println!("{:?}", fqi_range);
     // println!(
     //     "The following command will output {} leading and {} trailing records:",
     //     fqi_range.leading_records, fqi_range.trailing_records
     // );
-    // println!("    bgzip -b {} -s {} <file.gz>", fqi_range.start_byte, fqi_range.num_bytes);
+    // println!("    bgzip -b {} -s {} {:?}", fqi_range.start_byte, fqi_range.num_bytes(), opts.input);
 
     // Read the BGZF index and find the compressed offset
     let gzi = BgzfIndex::from(gzi_path);
@@ -65,16 +75,18 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     for entry in gzi.entries {
         if entry.uncompressed_offset < fqi_range.start_byte as u64 {
             start_entry = entry;
+            num_blocks = 0;
         }
         num_blocks += 1;
-        if entry.uncompressed_offset >= fqi_range.num_bytes as u64 {
+        if entry.uncompressed_offset >= fqi_range.end_byte as u64 {
             break;
         }
     }
 
     // Build a BgzfReader starting at the next FASTQ record
     let file = File::open(opts.input.clone()).unwrap();
-    let bgzf_reader: BgzfReader = BgzfReader::new(file, start_entry.compressed_offset, num_blocks);
+    let bgzf_reader: BgzfReader =
+        BgzfReader::new(file, fqi_range.start_byte, start_entry, num_blocks);
 
     // Write the FASTQ entries
     let reader = seq_io::fastq::Reader::new(bgzf_reader);
@@ -82,6 +94,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let mut num_to_write: u64 = end - start + 1;
     for (index, result) in reader.into_records().enumerate() {
         let rec = result?;
+
         if index as u64 >= fqi_range.leading_records {
             rec.write(&mut writer)?;
             num_to_write -= 1;
@@ -107,7 +120,7 @@ pub struct BgzfReader {
 }
 
 impl BgzfReader {
-    fn new(mut reader: File, compressed_offset: u64, num_blocks: usize) -> Self {
+    fn new(mut reader: File, start_byte: u64, entry: BgzfIndexOffset, num_blocks: usize) -> Self {
         let bgzf = Bgzf::new();
         let header_buf = vec![0; Bgzf::HEADER_SIZE];
         let compressed_buffer = BytesMut::with_capacity(BGZF_BLOCK_SIZE);
@@ -115,7 +128,7 @@ impl BgzfReader {
         let decompressor = libdeflater::Decompressor::new();
         let uncompressed_data: Vec<u8> = vec![];
 
-        reader.seek(SeekFrom::Start(compressed_offset)).unwrap();
+        reader.seek(SeekFrom::Start(entry.compressed_offset)).unwrap();
 
         let mut bgzf_reader = BgzfReader {
             reader,
@@ -129,20 +142,17 @@ impl BgzfReader {
             num_blocks_left: num_blocks,
         };
 
-        // skip over any data until we hit a '@' or end of data
-        'outer: loop {
+        // move to the start uncompressed byte offset
+        let mut cur_uncompressed_offset = entry.uncompressed_offset;
+        while cur_uncompressed_offset < start_byte {
             // fill the data, stop when we have no more data
-            if bgzf_reader.fill().unwrap() == 0 {
+            if bgzf_reader.bytes_available() == 0 && bgzf_reader.fill().unwrap() == 0 {
                 break;
             }
-            // skip over any data until we hit a '@' or end of data
-            while bgzf_reader.uncompressed_data_index < bgzf_reader.uncompressed_data.len() {
-                if bgzf_reader.uncompressed_data[bgzf_reader.uncompressed_data_index] == b'@' {
-                    break 'outer;
-                }
-                bgzf_reader.uncompressed_data_index += 1;
-            }
+            cur_uncompressed_offset += 1;
+            bgzf_reader.uncompressed_data_index += 1;
         }
+
         bgzf_reader
     }
 
@@ -164,7 +174,11 @@ impl BgzfReader {
         // Read in a block!
 
         // Read the block header
-        self.reader.read_exact(&mut self.header_buf)?;
+        match self.reader.read_exact(&mut self.header_buf) {
+            Ok(()) => (),
+            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(0),
+            e => e.unwrap(),
+        }
         self.bgzf.check_header(&self.header_buf).unwrap();
 
         // Read the compressed block data
@@ -201,11 +215,10 @@ impl Read for BgzfReader {
             // no more data available, try to fill
             if self.bytes_available() == 0 {
                 // no more data was filled, return how many bytes we've read
-                if let Ok(0) = self.fill() {
+                if self.fill().unwrap() == 0 {
                     return Ok(buf_index);
                 }
             }
-            // add the byte
             buf[buf_index] = self.uncompressed_data[self.uncompressed_data_index];
             self.uncompressed_data_index += 1;
         }
@@ -240,91 +253,4 @@ pub fn setup() -> Opts {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     Opts::parse()
-}
-
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub struct FastqIndex {
-    pub num_records: u64,
-
-    pub total_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub struct FastqIndexRange {
-    pub start_byte: u64,
-    pub num_bytes: u64,
-    pub leading_records: u64,
-    pub trailing_records: u64,
-    pub num_records: u64,
-}
-
-impl FastqIndexRange {
-    pub fn from(fastq_index: &str, start_record: u64, end_record: u64) -> FastqIndexRange {
-        let indexes = {
-            let path = Path::new(fastq_index);
-            let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path).unwrap());
-            let mut entries: Vec<FastqIndex> = vec![];
-            while let Ok(num_records) = reader.read_u64::<LittleEndian>() {
-                let total_bytes = reader.read_u64::<LittleEndian>().unwrap();
-                let entry = FastqIndex { num_records, total_bytes };
-                entries.push(entry);
-            }
-            entries
-        };
-
-        let mut leading_records: u64 = start_record - 1;
-        let mut trailing_records: u64 = 0;
-        let mut start_byte: u64 = 0;
-        let mut end_byte: u64 = 0;
-        let mut num_records: u64 = 0;
-        for entry in indexes {
-            if entry.num_records < start_record {
-                leading_records = start_record - entry.num_records - 1;
-                start_byte = entry.total_bytes;
-            }
-            num_records += entry.num_records;
-            end_byte = entry.total_bytes;
-            if entry.num_records >= end_record {
-                trailing_records = entry.num_records - end_record;
-                break;
-            }
-        }
-
-        FastqIndexRange {
-            start_byte,
-            num_bytes: (end_byte - start_byte),
-            leading_records,
-            trailing_records,
-            num_records,
-        }
-    }
-}
-
-pub struct BgzfIndex {
-    pub num_entries: u64,
-    pub entries: Vec<BgzfIndexOffset>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BgzfIndexOffset {
-    pub compressed_offset: u64,
-    pub uncompressed_offset: u64,
-}
-
-impl BgzfIndex {
-    pub fn from(gzi_index: String) -> BgzfIndex {
-        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(gzi_index).unwrap());
-
-        let num_entries = reader.read_u64::<LittleEndian>().unwrap();
-
-        let mut entries = vec![BgzfIndexOffset { compressed_offset: 0, uncompressed_offset: 0 }];
-        for _ in 0..num_entries {
-            let compressed_offset = reader.read_u64::<LittleEndian>().unwrap();
-            let uncompressed_offset = reader.read_u64::<LittleEndian>().unwrap();
-            let entry = BgzfIndexOffset { compressed_offset, uncompressed_offset };
-            entries.push(entry);
-        }
-
-        BgzfIndex { num_entries: num_entries + 1, entries }
-    }
 }

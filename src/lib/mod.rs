@@ -6,7 +6,9 @@
     clippy::module_name_repetitions
 )]
 pub mod tools {
+    pub mod bgzf_index;
     pub mod extract;
+    pub mod fastq_index;
     pub mod index;
 }
 pub mod utils;
