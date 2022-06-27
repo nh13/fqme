@@ -4,7 +4,7 @@
 [![License](http://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nh13/fqme/blob/main/LICENSE)
 [![Language](http://img.shields.io/badge/language-rust-brightgreen.svg)](http://www.https://www.rust-lang.org/)
 
-*** Please do not use this for any serious work until unit tests have been completed ***
+***Please do not use this for any serious work until unit tests have been completed***
 
 ## Quickstart
 
