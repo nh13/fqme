@@ -36,3 +36,6 @@ built = { version = "0.5.1", features = ["git2"] }
 matches = "0.1.9"
 rstest = "0.12.0"
 tempfile = "3.2.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }

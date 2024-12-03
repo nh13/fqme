@@ -59,7 +59,7 @@ impl FastqIndex {
             }
 
             total_records += 1;
-            total_bytes += num_bytes as u64;
+            total_bytes += num_bytes;
 
             if let Some(ref mut writer) = fastq_writer {
                 rec.write(writer).unwrap();

@@ -25,7 +25,6 @@ enum Commands {
     Index(IndexOpts),
 }
 
-#[cfg(not(tarpaulin_include))]
 #[allow(clippy::too_many_lines)]
 fn main() {
     if std::env::var("RUST_LOG").is_err() {

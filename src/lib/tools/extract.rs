@@ -73,12 +73,12 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let mut start_entry: BgzfIndexOffset = gzi.entries[0];
     let mut num_blocks: usize = 0;
     for entry in gzi.entries {
-        if entry.uncompressed_offset < fqi_range.start_byte as u64 {
+        if entry.uncompressed_offset < fqi_range.start_byte {
             start_entry = entry;
             num_blocks = 0;
         }
         num_blocks += 1;
-        if entry.uncompressed_offset >= fqi_range.end_byte as u64 {
+        if entry.uncompressed_offset >= fqi_range.end_byte {
             break;
         }
     }
