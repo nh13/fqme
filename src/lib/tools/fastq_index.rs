@@ -54,6 +54,7 @@ impl FastqIndex {
             let rec: OwnedRecord = result.unwrap();
             let num_bytes = FastqIndex::record_to_num_bytes(&rec);
 
+            #[allow(unknown_lints, clippy::manual_is_multiple_of)]
             if total_records % nth == 0 {
                 entries.push(FastqIndexEntry { total_records, total_bytes });
             }
