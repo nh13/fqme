@@ -200,36 +200,36 @@ impl FastqIndex {
             return self.range(start_record, self.total_records);
         }
 
-        let mut leading_records: u64 = start_record - 1;
-        let mut trailing_records: u64 = 0;
-        let mut start_byte: u64 = 0;
-        let mut end_byte: u64 = 0;
-        let mut total_records: u64 = 0;
-        let mut last_total_records: u64 = 0;
+        // Binary search for the first entry where total_records >= start_record
+        // The entry before it gives us start_byte and last_total_records
+        let start_idx = self.entries.partition_point(|e| e.total_records < start_record);
 
-        // TODO: binary search
-        let mut start_entry = 0;
-        for entry in &self.entries {
-            if start_record <= entry.total_records {
-                leading_records = (start_record - 1) % self.nth;
-                break;
-            }
-            start_byte = entry.total_bytes;
-            last_total_records = entry.total_records;
-            start_entry += 1;
-        }
+        let (start_byte, last_total_records) = if start_idx > 0 {
+            let prev = &self.entries[start_idx - 1];
+            (prev.total_bytes, prev.total_records)
+        } else {
+            (0, 0)
+        };
 
-        // TODO: binary search
-        for i in start_entry..self.entries.len() {
-            let entry = &self.entries[i];
+        #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+        let leading_records = (start_record - 1) % self.nth;
 
-            if end_record <= entry.total_records {
-                trailing_records = entry.total_records - end_record;
-                end_byte = entry.total_bytes;
-                total_records = entry.total_records - last_total_records;
-                break;
-            }
-        }
+        // Binary search for the first entry where total_records >= end_record
+        let end_idx =
+            self.entries[start_idx..].partition_point(|e| e.total_records < end_record) + start_idx;
+
+        let (end_byte, trailing_records, total_records) = if end_idx < self.entries.len() {
+            let entry = &self.entries[end_idx];
+            (
+                entry.total_bytes,
+                entry.total_records - end_record,
+                entry.total_records - last_total_records,
+            )
+        } else {
+            // end_record is beyond all entries
+            let last = &self.entries[self.entries.len() - 1];
+            (last.total_bytes, 0, last.total_records - last_total_records)
+        };
 
         Some(FastqIndexRange {
             start_byte,
