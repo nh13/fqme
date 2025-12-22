@@ -628,8 +628,8 @@ mod test {
         // So we need to skip 0 leading records and 1 trailing record
         let range = index.range(4, 5).unwrap();
         assert_eq!(range.start_byte, 102); // starts at byte 102 (after first 3 records)
-        assert_eq!(range.end_byte, 204);   // ends at byte 204 (after 6 records)
-        assert_eq!(range.leading_records, 0);  // NO leading records to skip
+        assert_eq!(range.end_byte, 204); // ends at byte 204 (after 6 records)
+        assert_eq!(range.leading_records, 0); // NO leading records to skip
         assert_eq!(range.trailing_records, 1); // skip record 6
         assert_eq!(range.selected_records(), 2);
     }
