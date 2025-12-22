@@ -70,6 +70,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
 
     // Read the BGZF index and find the compressed offset
     let gzi = BgzfIndex::from(&gzi_path)?;
+    ensure!(!gzi.entries.is_empty(), "GZI index file is empty or corrupted: {}", gzi_path);
     let mut start_entry: BgzfIndexOffset = gzi.entries[0];
     let mut num_blocks: usize = 0;
     for entry in gzi.entries {
