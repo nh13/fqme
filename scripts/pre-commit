@@ -1,0 +1,35 @@
+#!/bin/bash
+# Pre-commit hook to run the same checks as CI
+# Install with: cp scripts/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Run cargo fmt check
+echo "Checking formatting..."
+if ! cargo fmt -- --check; then
+    echo ""
+    echo "ERROR: Formatting check failed. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run cargo clippy with the same flags as CI
+# Using stable toolchain to match CI behavior
+echo "Running clippy..."
+if rustup run stable rustc --version >/dev/null 2>&1; then
+    if ! cargo +stable clippy --all-features -- -D warnings; then
+        echo ""
+        echo "ERROR: Clippy check failed. Fix the warnings above."
+        exit 1
+    fi
+else
+    echo "Note: stable toolchain not found, using default"
+    if ! cargo clippy --all-features -- -D warnings; then
+        echo ""
+        echo "ERROR: Clippy check failed. Fix the warnings above."
+        exit 1
+    fi
+fi
+
+echo "All pre-commit checks passed!"

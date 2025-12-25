@@ -56,7 +56,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let gzi_path = format!("{}.{}", opts.input.to_string_lossy(), "gzi");
 
     // Read the FASTQ index
-    let fastq_index = FastqIndex::read(Path::new(&fqi_path));
+    let fastq_index = FastqIndex::read(Path::new(&fqi_path))?;
     let fqi_range = match fastq_index.range(start, end) {
         Some(range) => range,
         None => return Ok(()),
@@ -69,7 +69,8 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     // println!("    bgzip -b {} -s {} {:?}", fqi_range.start_byte, fqi_range.num_bytes(), opts.input);
 
     // Read the BGZF index and find the compressed offset
-    let gzi = BgzfIndex::from(gzi_path);
+    let gzi = BgzfIndex::from(&gzi_path)?;
+    ensure!(!gzi.entries.is_empty(), "GZI index file is empty or corrupted: {}", gzi_path);
     let mut start_entry: BgzfIndexOffset = gzi.entries[0];
     let mut num_blocks: usize = 0;
     for entry in gzi.entries {
@@ -84,7 +85,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     }
 
     // Build a BgzfReader starting at the next FASTQ record
-    let file = File::open(opts.input.clone()).unwrap();
+    let file = File::open(&opts.input)?;
     let bgzf_reader: BgzfReader =
         BgzfReader::new(file, fqi_range.start_byte, start_entry, num_blocks);
 

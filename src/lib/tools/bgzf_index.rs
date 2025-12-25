@@ -1,5 +1,9 @@
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::{fs::File, io::BufReader};
+use std::{
+    fs::File,
+    io::{self, BufReader},
+    path::Path,
+};
 
 use crate::utils::BUFFERSIZE;
 
@@ -15,19 +19,19 @@ pub struct BgzfIndexOffset {
 }
 
 impl BgzfIndex {
-    pub fn from(gzi_index: String) -> BgzfIndex {
-        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(gzi_index).unwrap());
+    pub fn from<P: AsRef<Path>>(gzi_index: P) -> io::Result<BgzfIndex> {
+        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(gzi_index)?);
 
-        let num_entries = reader.read_u64::<LittleEndian>().unwrap();
+        let num_entries = reader.read_u64::<LittleEndian>()?;
 
         let mut entries = vec![BgzfIndexOffset { compressed_offset: 0, uncompressed_offset: 0 }];
         for _ in 0..num_entries {
-            let compressed_offset = reader.read_u64::<LittleEndian>().unwrap();
-            let uncompressed_offset = reader.read_u64::<LittleEndian>().unwrap();
+            let compressed_offset = reader.read_u64::<LittleEndian>()?;
+            let uncompressed_offset = reader.read_u64::<LittleEndian>()?;
             let entry = BgzfIndexOffset { compressed_offset, uncompressed_offset };
             entries.push(entry);
         }
 
-        BgzfIndex { num_entries: num_entries + 1, entries }
+        Ok(BgzfIndex { num_entries: num_entries + 1, entries })
     }
 }

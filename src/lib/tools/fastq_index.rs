@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Stdout},
+    io::{self, BufReader, BufWriter, Stdout},
     path::Path,
 };
 
@@ -29,32 +29,33 @@ pub struct FastqIndex {
 }
 
 impl FastqIndex {
-    pub fn read(path: &Path) -> FastqIndex {
-        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path).unwrap());
+    pub fn read(path: &Path) -> io::Result<FastqIndex> {
+        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path)?);
         let mut entries: Vec<FastqIndexEntry> = vec![];
-        let total_records = reader.read_u64::<LittleEndian>().unwrap();
-        let nth = reader.read_u64::<LittleEndian>().unwrap();
+        let total_records = reader.read_u64::<LittleEndian>()?;
+        let nth = reader.read_u64::<LittleEndian>()?;
         while let Ok(num_records) = reader.read_u64::<LittleEndian>() {
-            let total_bytes = reader.read_u64::<LittleEndian>().unwrap();
+            let total_bytes = reader.read_u64::<LittleEndian>()?;
             let entry = FastqIndexEntry { total_records: num_records, total_bytes };
             entries.push(entry);
         }
-        FastqIndex { total_records, nth, entries }
+        Ok(FastqIndex { total_records, nth, entries })
     }
 
     pub fn from(
         records: impl IntoIterator<Item = Result<OwnedRecord, Error>>,
         nth: u64,
         fastq_writer: &mut Option<BufWriter<Stdout>>,
-    ) -> FastqIndex {
+    ) -> io::Result<FastqIndex> {
         let mut total_bytes: u64 = 0;
         let mut total_records: u64 = 0;
         let mut entries: Vec<FastqIndexEntry> = vec![];
         for result in records {
-            let rec: OwnedRecord = result.unwrap();
+            let rec: OwnedRecord =
+                result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let num_bytes = FastqIndex::record_to_num_bytes(&rec);
 
-            if total_records % nth == 0 {
+            if total_records.is_multiple_of(nth) {
                 entries.push(FastqIndexEntry { total_records, total_bytes });
             }
 
@@ -62,21 +63,25 @@ impl FastqIndex {
             total_bytes += num_bytes;
 
             if let Some(ref mut writer) = fastq_writer {
-                rec.write(writer).unwrap();
+                rec.write(writer)?;
             }
         }
         entries.push(FastqIndexEntry { total_records, total_bytes });
-        FastqIndex { total_records, nth, entries }
+        Ok(FastqIndex { total_records, nth, entries })
     }
 
-    pub fn write(self, output: &Path) {
-        let mut writer = Io::default().new_writer(&output).unwrap();
-        writer.write_u64::<LittleEndian>(self.total_records).unwrap();
-        writer.write_u64::<LittleEndian>(self.nth).unwrap();
+    #[allow(unknown_lints, clippy::io_other_error)]
+    pub fn write(self, output: &Path) -> io::Result<()> {
+        let mut writer = Io::default()
+            .new_writer(&output)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        writer.write_u64::<LittleEndian>(self.total_records)?;
+        writer.write_u64::<LittleEndian>(self.nth)?;
         for entry in self.entries {
-            writer.write_u64::<LittleEndian>(entry.total_records).unwrap();
-            writer.write_u64::<LittleEndian>(entry.total_bytes).unwrap();
+            writer.write_u64::<LittleEndian>(entry.total_records)?;
+            writer.write_u64::<LittleEndian>(entry.total_bytes)?;
         }
+        Ok(())
     }
 
     pub fn record_to_num_bytes(rec: &OwnedRecord) -> u64 {
@@ -198,7 +203,7 @@ mod test {
                 Ok(record()),
             ]
         };
-        FastqIndex::from(records, 3, &mut None)
+        FastqIndex::from(records, 3, &mut None).unwrap()
     }
 
     #[test]
@@ -212,7 +217,7 @@ mod test {
         index_entries: usize,
     ) {
         let num_input_records = records.len();
-        let index = FastqIndex::from(records, nth, &mut None);
+        let index = FastqIndex::from(records, nth, &mut None).unwrap();
         let record_num_bytes = FastqIndex::record_to_num_bytes(&record());
         assert_eq!(index.entries.len(), index_entries);
         for i in 0..nth as usize {
@@ -394,5 +399,243 @@ mod test {
         let range = index.range(8, 9).unwrap();
         assert_eq!(range, expected);
         assert_eq!(range.selected_records(), 1);
+    }
+
+    // ==================== Edge Case Tests ====================
+    // These tests validate the range calculation logic, particularly:
+    // - The modulo calculation: (start_record - 1) % self.nth
+    // - The loop termination when end_record is at/near total_records
+
+    /// Helper to create an index with a specific number of records
+    fn index_with_n_records(n: usize, nth: u64) -> FastqIndex {
+        let records: Vec<Result<OwnedRecord, Error>> = (0..n).map(|_| Ok(record())).collect();
+        FastqIndex::from(records, nth, &mut None).unwrap()
+    }
+
+    #[test]
+    fn test_range_single_record_index() {
+        // Index with just 1 record, nth=1
+        // Entries: [0, 1] (at bytes [0, 34])
+        let index = index_with_n_records(1, 1);
+        assert_eq!(index.total_records, 1);
+        assert_eq!(index.entries.len(), 2);
+
+        // Query the only record
+        let range = index.range(1, 1).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 34);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 1);
+    }
+
+    #[test]
+    fn test_range_single_record_index_large_nth() {
+        // Index with just 1 record, nth=100 (larger than total records)
+        // Entries: [0, 1] (at bytes [0, 34])
+        let index = index_with_n_records(1, 100);
+        assert_eq!(index.total_records, 1);
+        assert_eq!(index.entries.len(), 2); // entry at 0 + final entry
+
+        let range = index.range(1, 1).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 34);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 1);
+    }
+
+    #[test]
+    fn test_range_empty_index() {
+        // Index with 0 records
+        let index = index_with_n_records(0, 3);
+        assert_eq!(index.total_records, 0);
+
+        // Any query should return None
+        assert_eq!(index.range(1, 1), None);
+        assert_eq!(index.range(0, 1), None);
+    }
+
+    #[test]
+    fn test_range_at_exact_chunk_boundaries() {
+        // 9 records, nth=3
+        // Entries at total_records: [0, 3, 6, 9] with bytes [0, 102, 204, 306]
+        let index = index_with_n_records(9, 3);
+        assert_eq!(index.total_records, 9);
+        assert_eq!(index.entries.len(), 4);
+
+        // Query exactly at first chunk boundary: record 3 (1-indexed)
+        // Record 3 is at position 2 in chunk [1,2,3], so leading_records = 2
+        let range = index.range(3, 3).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 102);
+        assert_eq!(range.leading_records, 2);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 1);
+
+        // Query at second chunk boundary: record 6 (1-indexed)
+        // Record 6 is at position 2 in chunk [4,5,6], so leading_records = 2
+        let range = index.range(6, 6).unwrap();
+        assert_eq!(range.start_byte, 102);
+        assert_eq!(range.end_byte, 204);
+        assert_eq!(range.leading_records, 2);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 1);
+
+        // Query record right after chunk boundary: record 4 (1-indexed)
+        // Record 4 is at position 0 in chunk [4,5,6], so leading_records = 0
+        let range = index.range(4, 4).unwrap();
+        assert_eq!(range.start_byte, 102);
+        assert_eq!(range.end_byte, 204);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 2);
+        assert_eq!(range.selected_records(), 1);
+    }
+
+    #[test]
+    fn test_range_spanning_multiple_chunks() {
+        // 9 records, nth=3
+        let index = index_with_n_records(9, 3);
+
+        // Query spanning all chunks: [1, 9]
+        let range = index.range(1, 9).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 306);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 9);
+
+        // Query spanning middle: [2, 8]
+        let range = index.range(2, 8).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 306);
+        assert_eq!(range.leading_records, 1);
+        assert_eq!(range.trailing_records, 1);
+        assert_eq!(range.selected_records(), 7);
+    }
+
+    #[test]
+    fn test_range_last_record_non_aligned() {
+        // 8 records, nth=3 (same as index())
+        // Entries at total_records: [0, 3, 6, 8] with bytes [0, 102, 204, 272]
+        // The final chunk [7, 8] only has 2 records, not 3
+        let index = index();
+
+        // Query the very last record: [8, 8]
+        let range = index.range(8, 8).unwrap();
+        assert_eq!(range.start_byte, 204);
+        assert_eq!(range.end_byte, 272);
+        assert_eq!(range.leading_records, 1); // skip record 7
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 1);
+
+        // Query second-to-last: [7, 7]
+        let range = index.range(7, 7).unwrap();
+        assert_eq!(range.start_byte, 204);
+        assert_eq!(range.end_byte, 272);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 1);
+        assert_eq!(range.selected_records(), 1);
+
+        // Query both records in final chunk: [7, 8]
+        let range = index.range(7, 8).unwrap();
+        assert_eq!(range.start_byte, 204);
+        assert_eq!(range.end_byte, 272);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 2);
+    }
+
+    #[test]
+    fn test_range_large_nth_few_records() {
+        // 5 records, nth=100 (nth > total records)
+        // Entries: [0, 5] at bytes [0, 170]
+        let index = index_with_n_records(5, 100);
+        assert_eq!(index.total_records, 5);
+        assert_eq!(index.entries.len(), 2);
+
+        // Query middle record
+        let range = index.range(3, 3).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 170);
+        assert_eq!(range.leading_records, 2);
+        assert_eq!(range.trailing_records, 2);
+        assert_eq!(range.selected_records(), 1);
+
+        // Query all records
+        let range = index.range(1, 5).unwrap();
+        assert_eq!(range.start_byte, 0);
+        assert_eq!(range.end_byte, 170);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 5);
+    }
+
+    #[test]
+    fn test_range_nth_equals_one() {
+        // 5 records, nth=1 (every record indexed)
+        // Entries: [0, 1, 2, 3, 4, 5] at bytes [0, 34, 68, 102, 136, 170]
+        let index = index_with_n_records(5, 1);
+        assert_eq!(index.total_records, 5);
+        assert_eq!(index.entries.len(), 6);
+
+        // Each query should have exactly the bytes for those records
+        for i in 1..=5 {
+            let range = index.range(i, i).unwrap();
+            assert_eq!(range.start_byte, (i - 1) * 34);
+            assert_eq!(range.end_byte, i * 34);
+            assert_eq!(range.leading_records, 0);
+            assert_eq!(range.trailing_records, 0);
+            assert_eq!(range.selected_records(), 1);
+        }
+
+        // Range [2, 4]
+        let range = index.range(2, 4).unwrap();
+        assert_eq!(range.start_byte, 34);
+        assert_eq!(range.end_byte, 136);
+        assert_eq!(range.leading_records, 0);
+        assert_eq!(range.trailing_records, 0);
+        assert_eq!(range.selected_records(), 3);
+    }
+
+    #[test]
+    fn test_range_clamping_behavior() {
+        // 8 records, nth=3
+        let index = index();
+
+        // Start before first record (0) should clamp to 1
+        let range = index.range(0, 3).unwrap();
+        assert_eq!(range.selected_records(), 3);
+
+        // End after last record should clamp to total_records
+        let range = index.range(7, 100).unwrap();
+        assert_eq!(range.selected_records(), 2); // records 7 and 8
+
+        // Both clamped
+        let range = index.range(0, 100).unwrap();
+        assert_eq!(range.selected_records(), 8); // all records
+    }
+
+    #[test]
+    fn test_range_research_claim_validation() {
+        // This test specifically validates the research.md claim about bug 1.1:
+        // "If nth=3 and entries are indexed at [0, 3, 6, ...]:
+        //  Request range(4, 5) should have leading_records=1"
+        //
+        // Our analysis: The claim appears incorrect. Record 4 (1-indexed) is
+        // at position 0 in the chunk [4, 5, 6] (1-indexed), so leading_records=0.
+
+        // 9 records, nth=3 to have clean chunks
+        let index = index_with_n_records(9, 3);
+
+        // range(4, 5): records 4 and 5 are in chunk [4, 5, 6]
+        // Record 4 is at position 0, Record 5 is at position 1
+        // So we need to skip 0 leading records and 1 trailing record
+        let range = index.range(4, 5).unwrap();
+        assert_eq!(range.start_byte, 102); // starts at byte 102 (after first 3 records)
+        assert_eq!(range.end_byte, 204); // ends at byte 204 (after 6 records)
+        assert_eq!(range.leading_records, 0); // NO leading records to skip
+        assert_eq!(range.trailing_records, 1); // skip record 6
+        assert_eq!(range.selected_records(), 2);
     }
 }
