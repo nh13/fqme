@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Stdout},
+    io::{self, BufReader, BufWriter, Stdout},
     path::Path,
 };
 
@@ -29,29 +29,30 @@ pub struct FastqIndex {
 }
 
 impl FastqIndex {
-    pub fn read(path: &Path) -> FastqIndex {
-        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path).unwrap());
+    pub fn read(path: &Path) -> io::Result<FastqIndex> {
+        let mut reader = BufReader::with_capacity(BUFFERSIZE, File::open(path)?);
         let mut entries: Vec<FastqIndexEntry> = vec![];
-        let total_records = reader.read_u64::<LittleEndian>().unwrap();
-        let nth = reader.read_u64::<LittleEndian>().unwrap();
+        let total_records = reader.read_u64::<LittleEndian>()?;
+        let nth = reader.read_u64::<LittleEndian>()?;
         while let Ok(num_records) = reader.read_u64::<LittleEndian>() {
-            let total_bytes = reader.read_u64::<LittleEndian>().unwrap();
+            let total_bytes = reader.read_u64::<LittleEndian>()?;
             let entry = FastqIndexEntry { total_records: num_records, total_bytes };
             entries.push(entry);
         }
-        FastqIndex { total_records, nth, entries }
+        Ok(FastqIndex { total_records, nth, entries })
     }
 
     pub fn from(
         records: impl IntoIterator<Item = Result<OwnedRecord, Error>>,
         nth: u64,
         fastq_writer: &mut Option<BufWriter<Stdout>>,
-    ) -> FastqIndex {
+    ) -> io::Result<FastqIndex> {
         let mut total_bytes: u64 = 0;
         let mut total_records: u64 = 0;
         let mut entries: Vec<FastqIndexEntry> = vec![];
         for result in records {
-            let rec: OwnedRecord = result.unwrap();
+            let rec: OwnedRecord =
+                result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let num_bytes = FastqIndex::record_to_num_bytes(&rec);
 
             #[allow(unknown_lints, clippy::manual_is_multiple_of)]
@@ -63,21 +64,25 @@ impl FastqIndex {
             total_bytes += num_bytes;
 
             if let Some(ref mut writer) = fastq_writer {
-                rec.write(writer).unwrap();
+                rec.write(writer)?;
             }
         }
         entries.push(FastqIndexEntry { total_records, total_bytes });
-        FastqIndex { total_records, nth, entries }
+        Ok(FastqIndex { total_records, nth, entries })
     }
 
-    pub fn write(self, output: &Path) {
-        let mut writer = Io::default().new_writer(&output).unwrap();
-        writer.write_u64::<LittleEndian>(self.total_records).unwrap();
-        writer.write_u64::<LittleEndian>(self.nth).unwrap();
+    #[allow(unknown_lints, clippy::io_other_error)]
+    pub fn write(self, output: &Path) -> io::Result<()> {
+        let mut writer = Io::default()
+            .new_writer(&output)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        writer.write_u64::<LittleEndian>(self.total_records)?;
+        writer.write_u64::<LittleEndian>(self.nth)?;
         for entry in self.entries {
-            writer.write_u64::<LittleEndian>(entry.total_records).unwrap();
-            writer.write_u64::<LittleEndian>(entry.total_bytes).unwrap();
+            writer.write_u64::<LittleEndian>(entry.total_records)?;
+            writer.write_u64::<LittleEndian>(entry.total_bytes)?;
         }
+        Ok(())
     }
 
     pub fn record_to_num_bytes(rec: &OwnedRecord) -> u64 {
@@ -199,7 +204,7 @@ mod test {
                 Ok(record()),
             ]
         };
-        FastqIndex::from(records, 3, &mut None)
+        FastqIndex::from(records, 3, &mut None).unwrap()
     }
 
     #[test]
@@ -213,7 +218,7 @@ mod test {
         index_entries: usize,
     ) {
         let num_input_records = records.len();
-        let index = FastqIndex::from(records, nth, &mut None);
+        let index = FastqIndex::from(records, nth, &mut None).unwrap();
         let record_num_bytes = FastqIndex::record_to_num_bytes(&record());
         assert_eq!(index.entries.len(), index_entries);
         for i in 0..nth as usize {
@@ -405,7 +410,7 @@ mod test {
     /// Helper to create an index with a specific number of records
     fn index_with_n_records(n: usize, nth: u64) -> FastqIndex {
         let records: Vec<Result<OwnedRecord, Error>> = (0..n).map(|_| Ok(record())).collect();
-        FastqIndex::from(records, nth, &mut None)
+        FastqIndex::from(records, nth, &mut None).unwrap()
     }
 
     #[test]
