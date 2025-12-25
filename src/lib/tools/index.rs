@@ -41,7 +41,7 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
         }
     };
 
-    FastqIndex::from(reader, opts.nth, &mut fastq_writer).write(opts.output.as_path());
+    FastqIndex::from(reader, opts.nth, &mut fastq_writer)?.write(opts.output.as_path())?;
 
     Ok(())
 }
