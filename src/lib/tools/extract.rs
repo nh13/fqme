@@ -219,19 +219,29 @@ impl BgzfReader {
 
 impl Read for BgzfReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        #[allow(clippy::needless_range_loop)]
-        for buf_index in 0..buf.len() {
-            // no more data available, try to fill
-            if self.bytes_available() == 0 {
-                // no more data was filled, return how many bytes we've read
-                if self.fill().unwrap() == 0 {
-                    return Ok(buf_index);
-                }
+        let mut bytes_read = 0;
+
+        while bytes_read < buf.len() {
+            // Refill buffer if empty
+            if self.bytes_available() == 0 && self.fill()? == 0 {
+                break;
             }
-            buf[buf_index] = self.uncompressed_data[self.uncompressed_data_index];
-            self.uncompressed_data_index += 1;
+
+            // Bulk copy as much as possible
+            let available = self.bytes_available();
+            let remaining = buf.len() - bytes_read;
+            let to_copy = std::cmp::min(available, remaining);
+
+            buf[bytes_read..bytes_read + to_copy].copy_from_slice(
+                &self.uncompressed_data
+                    [self.uncompressed_data_index..self.uncompressed_data_index + to_copy],
+            );
+
+            self.uncompressed_data_index += to_copy;
+            bytes_read += to_copy;
         }
-        Ok(buf.len())
+
+        Ok(bytes_read)
     }
 }
 
