@@ -59,7 +59,15 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     let fastq_index = FastqIndex::read(Path::new(&fqi_path))?;
     let fqi_range = match fastq_index.range(start, end) {
         Some(range) => range,
-        None => return Ok(()),
+        None => {
+            log::warn!(
+                "Requested range [{}, {}] is out of bounds (file has {} records)",
+                start,
+                end,
+                fastq_index.total_records
+            );
+            return Ok(());
+        }
     };
     // println!("{:?}", fqi_range);
     // println!(
