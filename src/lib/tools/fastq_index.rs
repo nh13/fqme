@@ -99,8 +99,7 @@ impl FastqIndex {
                 result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let num_bytes = FastqIndex::record_to_num_bytes(&rec);
 
-            #[allow(unknown_lints, clippy::manual_is_multiple_of)]
-            if total_records % nth == 0 {
+            if total_records.is_multiple_of(nth) {
                 entries.push(FastqIndexEntry { total_records, total_bytes });
             }
 
@@ -133,8 +132,7 @@ impl FastqIndex {
         while let Some(result) = fastq_reader.next() {
             let rec = result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            #[allow(unknown_lints, clippy::manual_is_multiple_of)]
-            if total_records % nth == 0 {
+            if total_records.is_multiple_of(nth) {
                 entries.push(FastqIndexEntry { total_records, total_bytes });
             }
 
