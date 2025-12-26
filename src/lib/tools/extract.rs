@@ -23,6 +23,20 @@ use gzp::{deflate::Bgzf, BlockFormatSpec, FooterValues, FormatSpec, GzpError, BU
 
 const BGZF_BLOCK_SIZE: usize = 65280;
 
+/// Validates an extension string to prevent path traversal and malformed paths.
+fn validate_extension(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("Extension cannot be empty".to_string());
+    }
+    if s.contains('/') || s.contains('\\') {
+        return Err("Extension cannot contain path separators".to_string());
+    }
+    if s.contains('\0') {
+        return Err("Extension cannot contain null characters".to_string());
+    }
+    Ok(s.to_string())
+}
+
 /// Finds the (uncompressed) offset and length to use for bgzip -b <OFFSET> -s <LENGTH>
 #[derive(Parser, Debug)]
 #[clap(name = "fq2bam", verbatim_doc_comment, version = built_info::VERSION.as_str())]
@@ -36,8 +50,16 @@ pub struct Opts {
     pub start: Option<u64>,
 
     /// The last record to display (1-based inclusive).
-    #[clap(short = 'e', long, display_order = 2)]
+    #[clap(short = 'e', long, display_order = 3)]
     pub end: Option<u64>,
+
+    /// The FASTQ index file extension (appended to input file).
+    #[clap(long, default_value = "fqi", display_order = 4, value_parser = validate_extension)]
+    pub fqi_ext: String,
+
+    /// The GZI index file extension (appended to input file).
+    #[clap(long, default_value = "gzi", display_order = 5, value_parser = validate_extension)]
+    pub gzi_ext: String,
 }
 
 // Run extract
@@ -52,8 +74,8 @@ pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
     ensure!(start <= end, "--start must be less than or equal to --end");
 
     // Create the file names
-    let fqi_path = format!("{}.{}", opts.input.to_string_lossy(), "fqi");
-    let gzi_path = format!("{}.{}", opts.input.to_string_lossy(), "gzi");
+    let fqi_path = format!("{}.{}", opts.input.to_string_lossy(), opts.fqi_ext);
+    let gzi_path = format!("{}.{}", opts.input.to_string_lossy(), opts.gzi_ext);
 
     // Read the FASTQ index
     let fastq_index = FastqIndex::read(Path::new(&fqi_path))?;
