@@ -1,17 +1,54 @@
 use std::{
     fs::File,
-    io::{self, BufReader, BufWriter, Stdout},
+    io::{self, BufRead, BufReader, BufWriter, Stdout, Write},
     path::Path,
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use fgoxide::io::Io;
 use seq_io::{
-    fastq::{Error, OwnedRecord},
+    fastq::{Error, OwnedRecord, Reader as FastqReader},
     BaseRecord,
 };
 
 use crate::utils::BUFFERSIZE;
+
+/// A writer that counts bytes written without storing them.
+/// Used to measure the exact byte size of FASTQ records including separator lines.
+pub struct ByteCountingWriter {
+    count: u64,
+}
+
+impl ByteCountingWriter {
+    pub fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn reset(&mut self) {
+        self.count = 0;
+    }
+}
+
+impl Default for ByteCountingWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Write for ByteCountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.count += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct FastqIndexEntry {
@@ -42,6 +79,13 @@ impl FastqIndex {
         Ok(FastqIndex { total_records, nth, entries })
     }
 
+    /// Creates a FastqIndex from an iterator of records.
+    ///
+    /// **Note**: This method computes byte sizes from record fields, which is incorrect
+    /// for FASTQ files with comments on the `+` line. Use `from_reader` for accurate
+    /// byte position tracking.
+    #[deprecated(since = "0.1.0", note = "Use from_reader for accurate byte position tracking")]
+    #[allow(deprecated)]
     pub fn from(
         records: impl IntoIterator<Item = Result<OwnedRecord, Error>>,
         nth: u64,
@@ -71,6 +115,47 @@ impl FastqIndex {
         Ok(FastqIndex { total_records, nth, entries })
     }
 
+    /// Creates a FastqIndex from a reader, tracking actual byte positions.
+    ///
+    /// This method correctly handles FASTQ files with comments on the `+` line
+    /// by using `write_unchanged` to measure exact record sizes.
+    pub fn from_reader<R: BufRead>(
+        reader: R,
+        nth: u64,
+        fastq_writer: &mut Option<BufWriter<Stdout>>,
+    ) -> io::Result<FastqIndex> {
+        let mut fastq_reader = FastqReader::new(reader);
+        let mut total_records: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut entries: Vec<FastqIndexEntry> = vec![];
+        let mut byte_counter = ByteCountingWriter::new();
+
+        while let Some(result) = fastq_reader.next() {
+            let rec = result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+            if total_records % nth == 0 {
+                entries.push(FastqIndexEntry { total_records, total_bytes });
+            }
+
+            // Measure exact byte size using write_unchanged
+            byte_counter.reset();
+            rec.write_unchanged(&mut byte_counter)?;
+            total_bytes += byte_counter.count();
+
+            total_records += 1;
+
+            if let Some(ref mut writer) = fastq_writer {
+                rec.write(writer)?;
+            }
+        }
+
+        // Final entry with total counts
+        entries.push(FastqIndexEntry { total_records, total_bytes });
+
+        Ok(FastqIndex { total_records, nth, entries })
+    }
+
     #[allow(unknown_lints, clippy::io_other_error)]
     pub fn write(self, output: &Path) -> io::Result<()> {
         let mut writer = Io::default()
@@ -85,8 +170,15 @@ impl FastqIndex {
         Ok(())
     }
 
+    /// **Note**: This method assumes the '+' line is exactly "+\n", which is incorrect
+    /// for FASTQ files with comments on the '+' line. Use `from_reader` with actual
+    /// byte counting for accurate results.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Incorrect for FASTQ with '+' line comments; use from_reader"
+    )]
     pub fn record_to_num_bytes(rec: &OwnedRecord) -> u64 {
-        // NB: this is incorrect if there exists comment
+        // NB: this is incorrect if there exists a comment on the + line
         let num_bytes = 1 // leading '@'
             + rec.head.len()
             + 1 // newline
@@ -191,6 +283,7 @@ mod test {
         }
     }
 
+    #[allow(deprecated)]
     fn index() -> FastqIndex {
         let records: Vec<Result<OwnedRecord, Error>> = {
             vec![
@@ -208,10 +301,12 @@ mod test {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_fastq_index_record_to_num_bytes() {
         assert_eq!(FastqIndex::record_to_num_bytes(&record()), 34);
     }
 
+    #[allow(deprecated)]
     fn test_fastq_index_from(
         records: Vec<Result<OwnedRecord, Error>>,
         nth: u64,
@@ -402,6 +497,52 @@ mod test {
         assert_eq!(range.selected_records(), 1);
     }
 
+    #[test]
+    fn test_from_reader_tracks_positions() {
+        use std::io::Cursor;
+
+        // Create FASTQ data as bytes
+        let fastq_data = b"@read1\nACGT\n+\nIIII\n@read2\nGGGG\n+\nJJJJ\n@read3\nTTTT\n+\nKKKK\n";
+        let reader = Cursor::new(&fastq_data[..]);
+
+        let index = FastqIndex::from_reader(reader, 2, &mut None).unwrap();
+
+        assert_eq!(index.total_records, 3);
+        assert_eq!(index.entries.len(), 3); // entries at 0, 2, and final
+
+        // First entry: at record 0, byte 0
+        assert_eq!(index.entries[0].total_records, 0);
+        assert_eq!(index.entries[0].total_bytes, 0);
+
+        // Second entry: at record 2, after 2 records (each 19 bytes: @read\nACGT\n+\nIIII\n)
+        assert_eq!(index.entries[1].total_records, 2);
+        assert_eq!(index.entries[1].total_bytes, 38); // 19 * 2
+
+        // Final entry: all 3 records
+        assert_eq!(index.entries[2].total_records, 3);
+        assert_eq!(index.entries[2].total_bytes, 57); // 19 * 3
+    }
+
+    #[test]
+    fn test_from_reader_with_plus_comment() {
+        use std::io::Cursor;
+
+        // FASTQ data WITH comment on + line (the bug case)
+        let fastq_data = b"@read1\nACGT\n+this is a comment\nIIII\n@read2\nGGGG\n+\nJJJJ\n";
+        let reader = Cursor::new(&fastq_data[..]);
+
+        let index = FastqIndex::from_reader(reader, 1, &mut None).unwrap();
+
+        assert_eq!(index.total_records, 2);
+        assert_eq!(index.entries.len(), 3); // entries at 0, 1, and final
+
+        // First record is 36 bytes: @read1\nACGT\n+this is a comment\nIIII\n
+        // Second record is 19 bytes: @read2\nGGGG\n+\nJJJJ\n
+        assert_eq!(index.entries[0].total_bytes, 0);
+        assert_eq!(index.entries[1].total_bytes, 36); // First record with comment
+        assert_eq!(index.entries[2].total_bytes, 55); // 36 + 19
+    }
+
     // ==================== Edge Case Tests ====================
     // These tests validate the range calculation logic, particularly:
     // - The modulo calculation: (start_record - 1) % self.nth
@@ -409,8 +550,9 @@ mod test {
 
     /// Helper to create an index with a specific number of records
     fn index_with_n_records(n: usize, nth: u64) -> FastqIndex {
-        let records: Vec<Result<OwnedRecord, Error>> = (0..n).map(|_| Ok(record())).collect();
-        FastqIndex::from(records, nth, &mut None).unwrap()
+        #[allow(deprecated)]
+        let index = FastqIndex::from((0..n).map(|_| Ok(record())), nth, &mut None).unwrap();
+        index
     }
 
     #[test]

@@ -28,20 +28,15 @@ pub struct Opts {
 // Run index
 #[allow(clippy::too_many_lines)]
 pub fn run(opts: &Opts) -> Result<(), anyhow::Error> {
-    let reader = {
-        let reader = BufReader::with_capacity(BUFFERSIZE, io::stdin());
-        seq_io::fastq::Reader::new(reader).into_records()
+    let reader = BufReader::with_capacity(BUFFERSIZE, io::stdin());
+
+    let mut fastq_writer = if opts.no_stdout {
+        None
+    } else {
+        Some(BufWriter::with_capacity(BUFFERSIZE, io::stdout()))
     };
 
-    let mut fastq_writer = {
-        if opts.no_stdout {
-            None
-        } else {
-            Some(BufWriter::with_capacity(BUFFERSIZE, io::stdout()))
-        }
-    };
-
-    FastqIndex::from(reader, opts.nth, &mut fastq_writer)?.write(opts.output.as_path())?;
+    FastqIndex::from_reader(reader, opts.nth, &mut fastq_writer)?.write(opts.output.as_path())?;
 
     Ok(())
 }
